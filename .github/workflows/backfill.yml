@@ -1,0 +1,43 @@
+name: Backfill BDI
+
+# Roda o coletor do BDI para um intervalo de datas.
+# Disparo manual apenas: e uma operacao pesada (9 MB por pregao)
+# e so precisa acontecer uma vez.
+#
+# O formato atual do boletim comeca em 10/12/2025 - datas
+# anteriores sao ignoradas pelo proprio script.
+
+on:
+  workflow_dispatch:
+    inputs:
+      inicio:
+        description: "Data inicial (AAAA-MM-DD)"
+        required: true
+        default: "2025-12-10"
+        type: string
+      fim:
+        description: "Data final (AAAA-MM-DD)"
+        required: true
+        default: "2026-08-31"
+        type: string
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Rodar backfill
+        env:
+          PAINEL_TOKEN: ${{ secrets.PAINEL_TOKEN }}
+        run: python backfill_bdi.py ${{ inputs.inicio }} ${{ inputs.fim }}
