@@ -1,0 +1,100 @@
+//@version=6
+// ============================================================
+// Painel Dollar Academy - captura das 08:59
+// ============================================================
+// Congela o fechamento da ultima barra ANTES das 09:00 (horario
+// de Brasilia) e dispara um alerta com esse valor.
+//
+// POR QUE NAO DISPARA "AS 08:59 EM PONTO"
+//   O Pine so e avaliado quando chega tick. Um alerta amarrado a
+//   um minuto exato nao dispara se aquele minuto nao tiver
+//   negocio - foi assim que os alertas anteriores falharam.
+//
+//   Aqui a logica e outra: o script GUARDA o fechamento de cada
+//   barra enquanto ainda e antes das 09:00, e dispara o alerta no
+//   PRIMEIRO tick depois das 09:00. Se as 08:59 nao teve negocio,
+//   vale o ultimo valor anterior - que e exatamente a regra do
+//   "ultimo negocio antes das 9h".
+//
+// COMO USAR
+//   1. Abra o grafico do ativo no timeframe de 1 MINUTO
+//   2. Adicione este indicador
+//   3. Ajuste "Campo" para dx ou real_cme conforme o grafico
+//   4. Cole a chave em "Chave"
+//   5. Crie o alerta com condicao "alert() function calls only"
+//   6. Em Webhook URL, cole:
+//      https://uoabiezsuezmhwtbeerm.supabase.co/functions/v1/tv-webhook
+//
+// ATENCAO: o alerta congela os parametros no momento em que e
+// criado. Se mudar qualquer input depois, DELETE o alerta e crie
+// outro - editar nao adianta.
+// ============================================================
+
+indicator("Painel Dollar Academy - captura 08:59", overlay = true)
+
+campo    = input.string("dx", "Campo", options = ["dx", "real_cme"],
+           tooltip = "dx para o Dolar Index, real_cme para o 6L")
+contrato = input.string("DXU2026", "Contrato",
+           tooltip = "Codigo gravado junto com o valor, para auditoria")
+chave    = input.string("", "Chave",
+           tooltip = "Mesmo valor do segredo TV_CHAVE no Supabase")
+
+horaCorte   = input.int(9, "Hora do corte (Brasilia)", minval = 0, maxval = 23)
+minutoCorte = input.int(0, "Minuto do corte", minval = 0, maxval = 59)
+
+// --- horario de Brasilia ---
+h = hour(time, "America/Sao_Paulo")
+m = minute(time, "America/Sao_Paulo")
+minutosAgora = h * 60 + m
+minutosCorte = horaCorte * 60 + minutoCorte
+
+antesDoCorte = minutosAgora < minutosCorte
+
+// fechamento diario anterior, para calcular a variacao
+fechAnterior = request.security(syminfo.tickerid, "D", close[1])
+
+// --- estado que sobrevive entre barras ---
+var float valorCongelado = na
+var int   horaCongelada  = na
+var int   minCongelado   = na
+var bool  jaEnviou       = false
+var int   diaAnterior    = na
+
+diaAtual = dayofmonth(time, "America/Sao_Paulo")
+
+// zera tudo na virada do dia
+if diaAtual != diaAnterior
+    valorCongelado := na
+    horaCongelada  := na
+    minCongelado   := na
+    jaEnviou       := false
+    diaAnterior    := diaAtual
+
+// enquanto e antes do corte, guarda o ultimo fechamento visto
+if antesDoCorte and barstate.isconfirmed
+    valorCongelado := close
+    horaCongelada  := h
+    minCongelado   := m
+
+disparou = false
+
+// no primeiro tick depois do corte, dispara uma unica vez
+if not antesDoCorte and not jaEnviou and not na(valorCongelado)
+    jaEnviou := true
+    disparou := true
+    hhmm = str.format("{0,number,00}:{1,number,00}", horaCongelada, minCongelado)
+    msg = '{"chave":"' + chave +
+          '","campo":"' + campo +
+          '","contrato":"' + contrato +
+          '","valor":' + str.tostring(valorCongelado, "#.#####") +
+          ',"anterior":' + str.tostring(fechAnterior, "#.#####") +
+          ',"hora":"' + hhmm + '"}'
+    alert(msg, alert.freq_once_per_bar)
+
+// --- referencia visual ---
+plotshape(disparou, "Capturado", shape.labeldown, location.abovebar,
+          color = color.new(color.yellow, 20), textcolor = color.black,
+          text = "08:59", size = size.small)
+
+plot(valorCongelado, "Valor congelado", color = color.new(color.orange, 40),
+     linewidth = 1, style = plot.style_stepline)
