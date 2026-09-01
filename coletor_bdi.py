@@ -223,13 +223,15 @@ def main():
         log.info(f"DOL -> {saida_dol}")
 
         # validacao: o WDO do mesmo vencimento tem que ter o mesmo ajuste
-        alvo_wdo = "W" + alvo_dol[1:]
+        alvo_wdo = "WDO" + alvo_dol[3:]
         w = next((r for r in registros if r["instrumento"] == alvo_wdo), None)
         if w:
             if num(w["ajuste"]) != saida_dol["ajuste"]:
                 alertas.append(
                     f"wdo: ajuste {num(w['ajuste'])} difere do dol {saida_dol['ajuste']}"
                 )
+            else:
+                log.info(f"validacao ok: {alvo_wdo} tem o mesmo ajuste do {alvo_dol}")
         else:
             alertas.append(f"wdo: {alvo_wdo} nao encontrado (validacao pulada)")
     else:
