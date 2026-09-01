@@ -4,12 +4,21 @@ coletor_bdi.py - Painel Dollar Academy
 Le o Boletim Diario da B3 (capitulo 03-4, "Negocios consolidados
 do pregao") e extrai:
 
-  DI1  -> taxa de fechamento e taxa do ajuste do contrato de
-          MAIOR numero de negocios (hoje o DI1F29)
-  DOL  -> ajuste e ajuste D-1 do contrato corrente
+  DI1  -> taxa de fechamento e taxa do ajuste
+  DOL  -> ajuste e ajuste D-1
   WDO  -> usado so para validar (o ajuste tem que ser igual ao DOL)
 
-Roda no GitHub Actions, nao precisa da maquina do Rafael ligada.
+EM AMBOS OS CASOS o contrato escolhido e o de MAIOR NUMERO DE
+NEGOCIOS do dia, nao um contrato calculado por calendario.
+
+  Por que: a primeira versao calculava o contrato do DOL pela
+  regra "mes seguinte ao corrente" e exigia aquele codigo exato.
+  No backfill isso falhou em quase 100 pregoes (DOLM26, DOLK26,
+  DOLH26...), enquanto o DI1 - que ja era escolhido por liquidez -
+  nao falhou nenhuma vez. Liquidez e mais robusto e dispensa
+  saber o calendario de vencimento.
+
+Roda no GitHub Actions, nao precisa de maquina ligada.
 
 REGRA DE SEGURANCA
   As tres ultimas colunas do PDF (negocios / contratos / volume)
@@ -25,7 +34,7 @@ import sys
 import json
 import logging
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import requests
 import pdfplumber
@@ -36,12 +45,9 @@ from pypdf import PdfReader
 URL_INGEST = "https://uoabiezsuezmhwtbeerm.supabase.co/functions/v1/ingest-bdi"
 TOKEN = os.environ.get("PAINEL_TOKEN", "")
 
-COD_MES = "FGHJKMNQUVXZ"  # jan..dez
 PREFIXOS = ("DI1", "DOL", "WDO")
 ALVO = re.compile(r"^(DI1|DOL|WDO)[FGHJKMNQUVXZ]\d{2}$")
 
-# nomes das colunas, na ordem em que aparecem no boletim.
-# so as 15 primeiras sao confiaveis (ver REGRA DE SEGURANCA)
 COLUNAS = [
     "instrumento", "isin", "segmento", "abertura", "minimo", "maximo",
     "medio", "fechamento", "oscilacao", "ajuste", "ajuste_ref",
@@ -67,16 +73,6 @@ def num(txt):
         return None
 
 
-def contrato_dolar(d: date) -> str:
-    """
-    DOL vence no 1o dia util do mes; durante o mes corrente o
-    contrato negociado e o do mes SEGUINTE.
-    """
-    m = d.month  # 1..12 -> indice do mes seguinte em COD_MES
-    ano = d.year + (1 if m > 11 else 0)
-    return f"DOL{COD_MES[m % 12]}{str(ano)[2:]}"
-
-
 def baixar(pregao: str) -> bytes:
     url = (
         "https://arquivos.b3.com.br/bdi/download/bdi/"
@@ -92,15 +88,20 @@ def baixar(pregao: str) -> bytes:
 
 
 def achar_paginas(raw: bytes):
-    """Localiza as paginas com os contratos usando pypdf (rapido)."""
+    """
+    Localiza as paginas com os contratos usando pypdf.
+
+    Varre o documento inteiro de proposito: as paginas de DI1 e de
+    DOL/WDO ficam em blocos separados e distantes. A versao antiga
+    parava depois de achar tres paginas e por isso perdia o DOL em
+    boa parte dos pregoes.
+    """
     reader = PdfReader(io.BytesIO(raw))
     achadas = []
     for p in range(1, len(reader.pages) + 1):
         txt = reader.pages[p - 1].extract_text() or ""
         if any(re.search(rf"\b{x}[FGHJKMNQUVXZ]\d{{2}}\s+BR", txt) for x in PREFIXOS):
             achadas.append(p)
-        if len(achadas) >= 3 and p > max(achadas) + 3:
-            break
     log.info(f"paginas de cotacao: {achadas}")
     return achadas
 
@@ -140,7 +141,8 @@ def ler_linhas(raw: bytes, paginas):
             for ws in dados:
                 celulas = {}
                 for w in ws:
-                    i = min(range(len(fundidas)), key=lambda j: abs(fundidas[j] - w["x1"]))
+                    i = min(range(len(fundidas)),
+                            key=lambda j: abs(fundidas[j] - w["x1"]))
                     if abs(fundidas[i] - w["x1"]) > 12:
                         continue
                     celulas.setdefault(i, []).append(w["text"])
@@ -153,7 +155,6 @@ def ler_linhas(raw: bytes, paginas):
                 r = dict(zip(COLUNAS, campos[: len(COLUNAS)]))
                 r["instrumento"] = inst
                 r["_pagina"] = p
-                # negocios: penultima ou antepenultima coluna, so p/ ordenar
                 r["_neg"] = num(campos[-3]) or num(campos[-2]) or 0
                 registros.append(r)
     return registros
@@ -167,18 +168,68 @@ def coerente(r) -> bool:
     return mi <= fe <= ma
 
 
+def mais_liquido(registros, prefixo, exigir_coerencia=True):
+    """Contrato de maior numero de negocios entre os do prefixo."""
+    cands = [r for r in registros if r["instrumento"].startswith(prefixo)]
+    if exigir_coerencia:
+        coerentes = [r for r in cands if coerente(r)]
+        if coerentes:
+            cands = coerentes
+    if not cands:
+        return None
+    return max(cands, key=lambda r: r["_neg"])
+
+
+def extrair(registros, pregao):
+    """Monta o payload a partir das linhas lidas. Devolve (payload, alertas)."""
+    alertas = []
+    payload = {"pregao": pregao}
+
+    r = mais_liquido(registros, "DI1")
+    if r:
+        payload["di1"] = {
+            "contrato": r["instrumento"],
+            "taxa": num(r["fechamento"]),
+            "ajuste_taxa": num(r["ajuste_ref"]),
+            "negocios": r["_neg"],
+        }
+    else:
+        alertas.append("di1: nenhum contrato encontrado")
+
+    d = mais_liquido(registros, "DOL")
+    if d:
+        payload["dol"] = {
+            "contrato": d["instrumento"],
+            "ajuste": num(d["ajuste"]),
+            "ajuste_d1": num(d["ajuste_d1"]),
+        }
+        # o WDO do mesmo vencimento tem que ter o mesmo ajuste
+        alvo_wdo = "WDO" + d["instrumento"][3:]
+        w = next((x for x in registros if x["instrumento"] == alvo_wdo), None)
+        if w:
+            if num(w["ajuste"]) != payload["dol"]["ajuste"]:
+                alertas.append(
+                    f"wdo: ajuste {num(w['ajuste'])} difere do dol "
+                    f"{payload['dol']['ajuste']}"
+                )
+        else:
+            alertas.append(f"wdo: {alvo_wdo} nao encontrado (validacao pulada)")
+    else:
+        alertas.append("dol: nenhum contrato encontrado")
+
+    payload["alertas"] = alertas
+    return payload, alertas
+
+
 def main():
     if not TOKEN:
         log.error("PAINEL_TOKEN nao definido")
         sys.exit(1)
 
-    # pregao: o argumento, ou o dia corrente em BRT
     if len(sys.argv) > 1 and sys.argv[1].strip():
         pregao = sys.argv[1].strip()
     else:
         pregao = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
-
-    alertas = []
 
     try:
         raw = baixar(pregao)
@@ -194,58 +245,10 @@ def main():
     registros = ler_linhas(raw, paginas)
     log.info(f"{len(registros)} linhas lidas")
 
-    # ---- DI1: o de maior numero de negocios ----
-    di1 = [r for r in registros if r["instrumento"].startswith("DI1") and coerente(r)]
-    di1.sort(key=lambda r: r["_neg"], reverse=True)
-    saida_di1 = None
-    if di1:
-        r = di1[0]
-        saida_di1 = {
-            "contrato": r["instrumento"],
-            "taxa": num(r["fechamento"]),
-            "ajuste_taxa": num(r["ajuste_ref"]),
-            "negocios": r["_neg"],
-        }
-        log.info(f"DI1 -> {saida_di1}")
-    else:
-        alertas.append("di1: nenhum contrato coerente encontrado")
-
-    # ---- DOL: contrato corrente ----
-    alvo_dol = contrato_dolar(date.fromisoformat(pregao))
-    saida_dol = None
-    achado = next((r for r in registros if r["instrumento"] == alvo_dol), None)
-    if achado:
-        saida_dol = {
-            "contrato": alvo_dol,
-            "ajuste": num(achado["ajuste"]),
-            "ajuste_d1": num(achado["ajuste_d1"]),
-        }
-        log.info(f"DOL -> {saida_dol}")
-
-        # validacao: o WDO do mesmo vencimento tem que ter o mesmo ajuste
-        alvo_wdo = "WDO" + alvo_dol[3:]
-        w = next((r for r in registros if r["instrumento"] == alvo_wdo), None)
-        if w:
-            if num(w["ajuste"]) != saida_dol["ajuste"]:
-                alertas.append(
-                    f"wdo: ajuste {num(w['ajuste'])} difere do dol {saida_dol['ajuste']}"
-                )
-            else:
-                log.info(f"validacao ok: {alvo_wdo} tem o mesmo ajuste do {alvo_dol}")
-        else:
-            alertas.append(f"wdo: {alvo_wdo} nao encontrado (validacao pulada)")
-    else:
-        alertas.append(f"dol: contrato {alvo_dol} nao encontrado no boletim")
-
-    if not saida_di1 and not saida_dol:
+    payload, _ = extrair(registros, pregao)
+    if "di1" not in payload and "dol" not in payload:
         log.error("nada extraido - nao envia")
         sys.exit(1)
-
-    payload = {"pregao": pregao, "alertas": alertas}
-    if saida_di1:
-        payload["di1"] = saida_di1
-    if saida_dol:
-        payload["dol"] = saida_dol
 
     log.info(json.dumps(payload, ensure_ascii=False))
 
