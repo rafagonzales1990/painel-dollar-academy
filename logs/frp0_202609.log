@@ -1,0 +1,10 @@
+2026-09-01 12:37:27,930 | INFO | =======================================================
+2026-09-01 12:37:27,930 | INFO | coletor FRP0 - janela 09:55 as 10:35
+2026-09-01 12:37:27,933 | ERROR | (-2147221021, 'Operação não disponível', None, None)
+2026-09-01 12:42:29,121 | INFO | =======================================================
+2026-09-01 12:42:29,121 | INFO | coletor FRP0 - janela 09:55 as 10:35
+2026-09-01 12:42:29,123 | INFO | Excel nao respondeu pelo caminho normal ((-2147221021, 'Operação não disponível', None, None)); tentando ROT
+2026-09-01 12:42:29,123 | ERROR | nenhuma planilha do Excel encontrada.
+  1) confirme que o Excel esta aberto com a planilha do RTD
+  2) confirme que Excel e PowerShell estao no mesmo nivel de permissao (os dois normais, ou os dois como administrador)
+  3) se persistir, salve a planilha (Ctrl+S) e rode de novo
