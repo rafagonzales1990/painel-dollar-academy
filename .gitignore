@@ -1,0 +1,18 @@
+# logs dos coletores locais
+logs/
+*.log
+
+# temporarios do Excel
+~$*
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# cache do coletor do BDI
+bdi_pagina_cache.json
+bdi_parsed.json
+bdi_v3.json
+resultado_bdi.txt
