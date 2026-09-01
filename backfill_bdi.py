@@ -9,13 +9,15 @@ Uso:
 Pula fins de semana e feriados automaticamente (o boletim nao
 existe nesses dias, retorna 404 e o script segue).
 
+Usa a mesma logica de extracao do coletor diario (coletor_bdi.
+extrair), entao qualquer correcao la vale aqui tambem.
+
 ATENCAO AO ALCANCE
   O formato atual do BDI_03-4 comecou quando a B3 migrou os
   "Ajustes do Pregao" para o boletim, em 10/12/2025. Antes disso
-  o capitulo tem outra estrutura (2 paginas em vez de 600+) e
-  este parser nao funciona. Nao adianta pedir datas anteriores.
+  o capitulo tem outra estrutura e este parser nao funciona.
 
-Baixa ~9 MB por pregao. Para 180 dias sao ~1,6 GB e uns 30 min.
+Baixa ~9 MB por pregao.
 ================================================================
 """
 
@@ -25,6 +27,8 @@ import logging
 from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+
 import coletor_bdi as c
 
 logging.basicConfig(
@@ -32,11 +36,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("backfill")
 
-PARALELO = 3   # downloads simultaneos; nao aumentar muito
-PAUSA = 0.5    # segundos entre lotes
+PARALELO = 3
+PAUSA = 0.5
 
 
-def um_dia(pregao: str) -> tuple[str, str]:
+def um_dia(pregao: str):
     """Processa um pregao. Devolve (pregao, resultado)."""
     try:
         raw = c.baixar(pregao)
@@ -51,53 +55,11 @@ def um_dia(pregao: str) -> tuple[str, str]:
             return pregao, "nenhuma pagina de cotacao"
 
         registros = c.ler_linhas(raw, paginas)
-        alertas = []
+        payload, alertas = c.extrair(registros, pregao)
 
-        di1 = [r for r in registros
-               if r["instrumento"].startswith("DI1") and c.coerente(r)]
-        di1.sort(key=lambda r: r["_neg"], reverse=True)
-        saida_di1 = None
-        if di1:
-            r = di1[0]
-            saida_di1 = {
-                "contrato": r["instrumento"],
-                "taxa": c.num(r["fechamento"]),
-                "ajuste_taxa": c.num(r["ajuste_ref"]),
-                "negocios": r["_neg"],
-            }
+        if "di1" not in payload and "dol" not in payload:
+            return pregao, f"nada extraido ({len(registros)} linhas lidas)"
 
-        alvo_dol = c.contrato_dolar(date.fromisoformat(pregao))
-        saida_dol = None
-        achado = next(
-            (r for r in registros if r["instrumento"] == alvo_dol), None
-        )
-        if achado:
-            saida_dol = {
-                "contrato": alvo_dol,
-                "ajuste": c.num(achado["ajuste"]),
-                "ajuste_d1": c.num(achado["ajuste_d1"]),
-            }
-            alvo_wdo = "WDO" + alvo_dol[3:]
-            w = next(
-                (r for r in registros if r["instrumento"] == alvo_wdo), None
-            )
-            if w and c.num(w["ajuste"]) != saida_dol["ajuste"]:
-                alertas.append(
-                    f"wdo: ajuste {c.num(w['ajuste'])} difere do dol"
-                )
-        else:
-            alertas.append(f"dol: {alvo_dol} nao encontrado")
-
-        if not saida_di1 and not saida_dol:
-            return pregao, "nada extraido"
-
-        payload = {"pregao": pregao, "alertas": alertas}
-        if saida_di1:
-            payload["di1"] = saida_di1
-        if saida_dol:
-            payload["dol"] = saida_dol
-
-        import requests
         r = requests.post(
             c.URL_INGEST,
             headers={"X-Painel-Token": c.TOKEN,
@@ -109,10 +71,10 @@ def um_dia(pregao: str) -> tuple[str, str]:
             return pregao, f"ingest HTTP {r.status_code}"
 
         partes = []
-        if saida_di1:
-            partes.append(f"{saida_di1['contrato']} {saida_di1['taxa']}")
-        if saida_dol:
-            partes.append(f"{saida_dol['contrato']} {saida_dol['ajuste']}")
+        if "di1" in payload:
+            partes.append(f"{payload['di1']['contrato']} {payload['di1']['taxa']}")
+        if "dol" in payload:
+            partes.append(f"{payload['dol']['contrato']} {payload['dol']['ajuste']}")
         return pregao, "ok: " + " | ".join(partes)
 
     except Exception as e:
