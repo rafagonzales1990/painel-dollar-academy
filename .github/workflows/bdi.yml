@@ -1,0 +1,41 @@
+name: Coletor BDI
+
+# Horarios em UTC. Brasil = UTC-3, sem horario de verao.
+#   23:00 UTC = 20:00 BRT  (primeira tentativa)
+#   00:30 UTC = 21:30 BRT  (retry, caso o boletim atrase)
+#   02:00 UTC = 23:00 BRT  (ultima tentativa do dia)
+# O script sai sem erro quando o boletim ainda nao foi publicado,
+# entao rodar tres vezes nao gera falha nem duplicata.
+
+on:
+  schedule:
+    - cron: "0 23 * * 1-5"
+    - cron: "30 0 * * 2-6"
+    - cron: "0 2 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      pregao:
+        description: "Data do pregao (AAAA-MM-DD). Vazio = hoje."
+        required: false
+        type: string
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Rodar coletor
+        env:
+          PAINEL_TOKEN: ${{ secrets.PAINEL_TOKEN }}
+        run: python coletor_bdi.py ${{ inputs.pregao }}
