@@ -17,8 +17,13 @@ PROTECAO IMPORTANTE
 
   Ordem que funciona: abrir o Profit ANTES do Black Arrow.
 
-Requisitos:  pip install pywin32 requests
-Token:       setx PAINEL_FRP0_TOKEN "seu_token"  (e reabrir o terminal)
+COMO RODAR
+  cd C:\\dev\\painel-dollar-academy
+  pip install pywin32 requests
+  setx PAINEL_FRP0_TOKEN "seu_token"     (uma vez; reabrir o terminal)
+  python coletor_frp0.py
+
+Os logs ficam em C:\\dev\\painel-dollar-academy\\logs (fora do git).
 ================================================================
 """
 
@@ -47,7 +52,8 @@ JANELA_FIM = "10:35"
 INTERVALO_SEG = 15
 ENVIO_SEG = 60
 
-LOG_DIR = os.path.join(os.path.expanduser("~"), "logs_painel")
+# logs ao lado do script, dentro do projeto
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 # ==============================================================
 
@@ -69,14 +75,13 @@ BRT = timezone(timedelta(hours=-3))
 
 
 def sem_acento(t):
-    tabela = str.maketrans("aaaaeeiooouuc", "aaaaeeiooouuc")
     t = str(t or "").strip().lower()
     for de, para in (("\u00fa", "u"), ("\u00e1", "a"), ("\u00e9", "e"),
                      ("\u00ed", "i"), ("\u00f3", "o"), ("\u00e2", "a"),
                      ("\u00ea", "e"), ("\u00f4", "o"), ("\u00e3", "a"),
                      ("\u00f5", "o"), ("\u00e7", "c")):
         t = t.replace(de, para)
-    return t.translate(tabela)
+    return t
 
 
 def localizar():
