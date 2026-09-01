@@ -23,6 +23,10 @@ COMO RODAR
   setx PAINEL_FRP0_TOKEN "seu_token"     (uma vez; reabrir o terminal)
   python coletor_frp0.py
 
+O Excel e o PowerShell precisam estar no mesmo nivel de permissao:
+ou os dois normais, ou os dois como administrador. Se um for
+elevado e o outro nao, o Windows nao deixa os dois conversarem.
+
 Os logs ficam em C:\\dev\\painel-dollar-academy\\logs (fora do git).
 ================================================================
 """
@@ -34,6 +38,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import requests
+import pythoncom
 import win32com.client
 
 # ==============================================================
@@ -52,7 +57,6 @@ JANELA_FIM = "10:35"
 INTERVALO_SEG = 15
 ENVIO_SEG = 60
 
-# logs ao lado do script, dentro do projeto
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 # ==============================================================
@@ -84,57 +88,107 @@ def sem_acento(t):
     return t
 
 
-def localizar():
+def abas_abertas():
     """
-    Varre as planilhas abertas procurando a linha do FRP0.
-    Devolve (aba, linha, coluna_hora, coluna_valor).
-    """
-    excel = win32com.client.GetActiveObject("Excel.Application")
-    if excel.Workbooks.Count == 0:
-        raise RuntimeError("o Excel esta aberto, mas sem nenhuma planilha")
+    Devolve a lista de abas de todas as planilhas abertas.
 
-    for i in range(excel.Workbooks.Count):
-        wb = excel.Workbooks.Item(i + 1)
-        for j in range(wb.Worksheets.Count):
-            aba = wb.Worksheets.Item(j + 1)
+    Tenta primeiro o caminho normal (GetActiveObject). Se o Excel
+    nao estiver registrado como objeto ativo - o que acontece com
+    frequencia no Windows - varre a Running Object Table atras das
+    pastas de trabalho abertas.
+    """
+    abas = []
+
+    try:
+        excel = win32com.client.GetActiveObject("Excel.Application")
+        for i in range(excel.Workbooks.Count):
+            wb = excel.Workbooks.Item(i + 1)
+            for j in range(wb.Worksheets.Count):
+                abas.append((wb.Name, wb.Worksheets.Item(j + 1)))
+        if abas:
+            return abas
+        log.warning("Excel encontrado, mas sem planilhas abertas")
+    except Exception as e:
+        log.info(f"Excel nao respondeu pelo caminho normal ({e}); tentando ROT")
+
+    # fallback: Running Object Table
+    try:
+        ctx = pythoncom.CreateBindCtx(0)
+        rot = pythoncom.GetRunningObjectTable()
+        for moniker in rot:
             try:
-                usada = aba.UsedRange
-                nlin = min(usada.Rows.Count, 200)
-                ncol = min(usada.Columns.Count, 40)
+                nome = moniker.GetDisplayName(ctx, None)
             except Exception:
                 continue
-
-            linha_ativo = None
-            for r in range(1, nlin + 1):
-                if sem_acento(aba.Cells(r, 1).Value) == ATIVO.lower():
-                    linha_ativo = r
-                    break
-            if not linha_ativo:
+            if not nome.lower().endswith((".xlsx", ".xlsm", ".xls", ".xlsb")):
                 continue
-
-            # cabecalho: procura acima da linha do ativo
-            col_hora = col_valor = None
-            for r in range(1, linha_ativo):
-                for c in range(1, ncol + 1):
-                    nome = sem_acento(aba.Cells(r, c).Value)
-                    if nome == COL_HORA:
-                        col_hora = c
-                    elif nome == COL_VALOR:
-                        col_valor = c
-                if col_hora and col_valor:
-                    break
-
-            if col_valor:
-                log.info(
-                    f"encontrado em '{wb.Name}' / aba '{aba.Name}' "
-                    f"linha {linha_ativo}, valor col {col_valor}, "
-                    f"hora col {col_hora or 'ausente'}"
+            try:
+                obj = rot.GetObject(moniker)
+                wb = win32com.client.Dispatch(
+                    obj.QueryInterface(pythoncom.IID_IDispatch)
                 )
-                return aba, linha_ativo, col_hora, col_valor
+                for j in range(wb.Worksheets.Count):
+                    abas.append((wb.Name, wb.Worksheets.Item(j + 1)))
+            except Exception:
+                continue
+    except Exception as e:
+        log.error(f"falha ao varrer a ROT: {e}")
+
+    return abas
+
+
+def localizar():
+    """Acha a linha do FRP0. Devolve (aba, linha, col_hora, col_valor)."""
+    abas = abas_abertas()
+    if not abas:
+        raise RuntimeError(
+            "nenhuma planilha do Excel encontrada.\n"
+            "  1) confirme que o Excel esta aberto com a planilha do RTD\n"
+            "  2) confirme que Excel e PowerShell estao no mesmo nivel de "
+            "permissao (os dois normais, ou os dois como administrador)\n"
+            "  3) se persistir, salve a planilha (Ctrl+S) e rode de novo"
+        )
+
+    log.info(f"{len(abas)} abas encontradas")
+
+    for nome_wb, aba in abas:
+        try:
+            usada = aba.UsedRange
+            nlin = min(usada.Rows.Count, 200)
+            ncol = min(usada.Columns.Count, 40)
+        except Exception:
+            continue
+
+        linha_ativo = None
+        for r in range(1, nlin + 1):
+            if sem_acento(aba.Cells(r, 1).Value) == ATIVO.lower():
+                linha_ativo = r
+                break
+        if not linha_ativo:
+            continue
+
+        col_hora = col_valor = None
+        for r in range(1, linha_ativo):
+            for c in range(1, ncol + 1):
+                nome = sem_acento(aba.Cells(r, c).Value)
+                if nome == COL_HORA:
+                    col_hora = c
+                elif nome == COL_VALOR:
+                    col_valor = c
+            if col_hora and col_valor:
+                break
+
+        if col_valor:
+            log.info(
+                f"encontrado em '{nome_wb}' / aba '{aba.Name}' "
+                f"linha {linha_ativo}, valor col {col_valor}, "
+                f"hora col {col_hora or 'ausente'}"
+            )
+            return aba, linha_ativo, col_hora, col_valor
 
     raise RuntimeError(
         f"nao achei uma linha '{ATIVO}' na primeira coluna de nenhuma "
-        "planilha aberta. Abra a planilha do RTD e tente de novo."
+        "das abas abertas"
     )
 
 
@@ -201,6 +255,7 @@ def main():
     log.info("=" * 55)
     log.info(f"coletor FRP0 - janela {JANELA_INICIO} as {JANELA_FIM}")
 
+    pythoncom.CoInitialize()
     try:
         aba, linha, col_hora, col_valor = localizar()
     except Exception as e:
