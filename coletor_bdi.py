@@ -34,7 +34,7 @@ import sys
 import json
 import logging
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 import pdfplumber
@@ -80,9 +80,20 @@ def baixar(pregao: str) -> bytes:
     )
     log.info(f"baixando {url}")
     r = requests.get(url, timeout=240)
-    if r.status_code == 404:
-        raise FileNotFoundError("boletim ainda nao publicado")
+
+    # A B3 responde 404 OU 500 quando o boletim ainda nao existe -
+    # o 500 derrubou o job de 01/09/2026 as 21h36. Tratamos os dois
+    # como "ainda nao publicado": o retry mais tarde resolve.
+    if r.status_code in (404, 500, 502, 503, 504):
+        raise FileNotFoundError(f"boletim indisponivel (HTTP {r.status_code})")
     r.raise_for_status()
+
+    # PDF valido comeca com %PDF; pagina de erro em HTML nao
+    if r.content[:4] != b"%PDF":
+        raise FileNotFoundError(
+            f"resposta nao e um PDF ({r.headers.get('Content-Type')})"
+        )
+
     log.info(f"ok - {len(r.content) / 1e6:.1f} MB")
     return r.content
 
@@ -229,12 +240,12 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].strip():
         pregao = sys.argv[1].strip()
     else:
-        pregao = (datetime.utcnow() - timedelta(hours=3)).date().isoformat()
+        pregao = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
 
     try:
         raw = baixar(pregao)
-    except FileNotFoundError:
-        log.warning(f"{pregao}: boletim ainda nao publicado - saindo sem erro")
+    except FileNotFoundError as e:
+        log.warning(f"{pregao}: {e} - saindo sem erro; o retry mais tarde tenta de novo")
         sys.exit(0)
 
     paginas = achar_paginas(raw)
